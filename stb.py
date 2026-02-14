@@ -198,7 +198,8 @@ class STBPlayer:
         parsed = urlparse(self.portal_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
         
-        urls = [base + '/c', base + '/portal.php', base + '/stalker_portal/c']
+        # Intentar solo 2 URLs para ser más rápido
+        urls = [base + '/c', base + '/portal.php']
         
         for url in urls:
             self.active_url = url
@@ -206,14 +207,14 @@ class STBPlayer:
             self.headers['Cookie'] = f'mac={self.mac}; stb_lang=en; timezone=Europe/Madrid'
             
             try:
-                response = self.session.get(url, params=params, headers=self.headers, timeout=15, verify=False)
+                response = self.session.get(url, params=params, headers=self.headers, timeout=8, verify=False)
                 data = response.json()
                 
                 if 'js' in data and 'token' in data['js']:
                     self.token = data['js']['token']
                     self.headers['Authorization'] = f'Bearer {self.token}'
                     return True
-            except:
+            except Exception:
                 continue
         return False
 
@@ -225,18 +226,18 @@ class STBPlayer:
             'JsHttpRequest': '1-xml'
         }
         try:
-            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=15, verify=False)
+            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=8, verify=False)
             return response.json().get('js', {})
-        except:
+        except Exception:
             return {}
 
     def get_categories(self):
         """Obtiene categorías de canales"""
         params = {'type': 'itv', 'action': 'get_genres', 'JsHttpRequest': '1-xml'}
         try:
-            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=15, verify=False)
+            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=8, verify=False)
             return response.json().get('js', [])
-        except:
+        except Exception:
             return []
 
     def get_channels(self, genre_id='*', page=1):
@@ -246,9 +247,9 @@ class STBPlayer:
             'sortby': 'number', 'p': page, 'JsHttpRequest': '1-xml'
         }
         try:
-            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=30, verify=False)
+            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=8, verify=False)
             return response.json().get('js', {})
-        except:
+        except Exception:
             return {}
 
     def get_all_channels_from_category(self, genre_id):
@@ -300,7 +301,7 @@ class STBPlayer:
             'JsHttpRequest': '1-xml'
         }
         try:
-            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=15, verify=False)
+            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=8, verify=False)
             data = response.json()
             
             if debug:
@@ -517,7 +518,7 @@ class STBPlayer:
             'JsHttpRequest': '1-xml'
         }
         try:
-            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=15, verify=False)
+            response = self.session.get(self.active_url, params=params, headers=self.headers, timeout=8, verify=False)
             data = response.json()
             if 'js' in data:
                 js = data['js']
@@ -545,10 +546,86 @@ def parse_portal_list(text):
     """Parsea diferentes formatos de listas de portales"""
     portals = []
     
+    # Normalizar box drawing: reemplazar separadores por saltos de línea
+    text = re.sub(r'[├│]─[•➨➛]', '\n', text)
+    text = re.sub(r'╭─[•➨➛]', '\n╭─•', text)
+    text = re.sub(r'╰─[?•]', '\n╰─', text)
+    
+    # Intentar formato tabla: Portal: URL seguido de tabla con MAC\tActive\tExpiry
+    table_pattern = r'Portal:\s*(https?://[^\s]+)'
+    table_matches = list(re.finditer(table_pattern, text, re.IGNORECASE))
+    
+    if table_matches:
+        # Primero intentar formato multi-línea: Portal: / MAC: / Expiry: en líneas separadas
+        multiline_portals = []
+        for match in table_matches:
+            portal_url = match.group(1).rstrip('/')
+            if not portal_url.endswith('/c'):
+                if '/c/' in portal_url:
+                    portal_url = portal_url.split('/c/')[0] + '/c'
+                else:
+                    portal_url = portal_url + '/c'
+            
+            # Buscar sección hasta el próximo Portal:
+            start_pos = match.end()
+            next_match_pos = table_matches[table_matches.index(match) + 1].start() if table_matches.index(match) + 1 < len(table_matches) else len(text)
+            section = text[start_pos:next_match_pos]
+            
+            # Buscar MAC: en la siguiente línea
+            mac_match = re.search(r'MAC:\s*([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})', section, re.IGNORECASE)
+            if mac_match:
+                mac = mac_match.group(1).upper().replace('-', ':')
+                
+                # Buscar Expiry: opcional
+                expiry = None
+                expiry_match = re.search(r'Expiry:\s*([A-Za-z]+ \d+, \d{4}[^\n]*)', section, re.IGNORECASE)
+                if expiry_match:
+                    expiry = expiry_match.group(1).strip()
+                    # Limpiar extras
+                    expiry = re.sub(r'\s+\d+\s*[Dd]ays.*$', '', expiry).strip()
+                
+                multiline_portals.append({
+                    'portal': portal_url,
+                    'mac': mac,
+                    'expiry': expiry
+                })
+                continue
+            
+            # Si no encontró formato multi-línea, intentar formato tabla (MAC\tActive\tExpiry)
+            for line in section.split('\n'):
+                line = line.strip()
+                # Formato: MAC\tActive\tExpiry... Days
+                mac_match = re.match(r'([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})\s+(?:Active|Inactive|Expired)\s+([A-Za-z]+ \d+, \d{4}[^0-9]*)', line)
+                if mac_match:
+                    mac = mac_match.group(1).upper()
+                    expiry = mac_match.group(2).strip()
+                    # Limpiar días al final
+                    expiry = re.sub(r'\s+\d+\s*[Dd]ays.*$', '', expiry).strip()
+                    portals.append({
+                        'portal': portal_url,
+                        'mac': mac,
+                        'expiry': expiry
+                    })
+        
+        # Usar multiline si encontró alguno, sino usar tabla
+        if multiline_portals:
+            portals = multiline_portals
+        
+        if portals:
+            # Eliminar duplicados
+            seen = set()
+            unique_portals = []
+            for p in portals:
+                key = (p['portal'], p['mac'])
+                if key not in seen:
+                    seen.add(key)
+                    unique_portals.append(p)
+            return unique_portals
+    
     # Patrón MAC simple (sin prefijo)
     simple_mac_pattern = r'^([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})$'
     # Patrón MAC con prefijo
-    mac_pattern = r'[Mm]a[cᴄ][➛➨:\s]+\s*([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})'
+    mac_pattern = r'(?:[Mm]a[cᴄ]|✅\s*MAC)[\s➤➛➨:]+\s*([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})'
     # Patrón URL simple (con o sin /c/)
     simple_url_pattern = r'^(https?://[^\s]+)$'
     
@@ -602,7 +679,7 @@ def parse_portal_list(text):
     portals = []
     
     # Dividir por bloques (cada HIT INFO o bloque Panel/Mac)
-    blocks = re.split(r'(?:╭─➨\s*HIT INFO|MAC FINDER|www\.linuxsat)', text, flags=re.IGNORECASE)
+    blocks = re.split(r'(?:╭─➨\s*HIT INFO|╭─•\s*Panel|MAC FINDER|www\.linuxsat)', text, flags=re.IGNORECASE)
     
     # También intentar dividir por líneas vacías múltiples si no hay bloques claros
     if len(blocks) <= 1:
@@ -614,16 +691,19 @@ def parse_portal_list(text):
     
     # Patrones de URL en orden de preferencia (Real primero, luego Panel, luego Host)
     url_patterns_ordered = [
-        (r'[Rr]eal[➛➨:\s]+\s*(https?://[^\s]+)', 'real'),
-        (r'[Pp]a[nɴ]el[➛➨:\s]+\s*(https?://[^\s]+)', 'panel'),
-        (r'[Hh]ost[➛➨:\s]+\s*(https?://[^\s]+)', 'host'),
-        (r'[Pp]ᴀɴᴇʟ[➛➨:\s]+\s*(https?://[^\s]+)', 'panel2'),
+        (r'[Rr]eal[➛➨➤:\s]+\s*(https?://[^\s]+)', 'real'),
+        (r'[Pp]a[nɴ]el[➛➨➤:\s]+\s*(https?://[^\s]+)', 'panel'),
+        (r'[Hh]ost[➛➨➤:\s]+\s*(https?://[^\s]+)', 'host'),
+        (r'[Pp]ᴀɴᴇʟ[➛➨➤:\s]+\s*(https?://[^\s]+)', 'panel2'),
+        (r'🛰\s*PORTAL\s*:\s*(https?://[^\s]+)', 'emoji_portal'),
     ]
     
     expiry_patterns = [
-        r'[Ee]xp(?:ira|iry|ir[yʏ]|)[➛➨:\s]+\s*([A-Za-z]+ \d+, \d{4}[^│\n]*)',
-        r'[Ee]xᴘɪʀᴀ[➛➨:\s]+\s*([A-Za-z]+ \d+, \d{4}[^│\n]*)',
-        r'[Ee]xp[➛➨:\s]+\s*(\d{2}-\d{2}-\d{4}[^│\n]*)',
+        r'[Ee]xp(?:ira|iry|ir[yʏ]|)[➛➨➤:\s]+\s*([A-Za-z]+ \d+, \d{4}[^│\n]*)',
+        r'[Ee]xᴘɪʀᴀ[➛➨➤:\s]+\s*([A-Za-z]+ \d+, \d{4}[^│\n]*)',
+        r'[Ee]xp[➛➨➤:\s]+\s*(\d{2}[.-]\d{2}[.-]\d{4}[^│\n]*)',
+        r'[Ee]xpires[➛➨➤:\s]+\s*(\d{2}\.\d{2}\.\d{4}[^│\n(]*)',
+        r'📆\s*Expired on\s*:\s*([A-Za-z]+ \d+, \d{4})',
     ]
     
     for block in blocks:
@@ -776,14 +856,31 @@ def check_single_portal(portal_info, country_filter, t, retry=True):
     expiry = portal_info.get('expiry')
     source = portal_info.get('source_file', '')
     
+    # Mostrar qué se está verificando
+    with print_lock:
+        print(f"\n⏳ Verificando: {portal[:50]} - {mac[:17]}")
+    
     # Limitar conexiones por servidor
     semaphore = get_server_semaphore(portal)
     
-    with semaphore:
-        # Pequeño delay aleatorio para evitar saturar
-        time.sleep(random.uniform(0.1, 0.5))
+    try:
+        # Adquirir semáforo con timeout para evitar bloqueos
+        if not semaphore.acquire(timeout=30):
+            with print_lock:
+                print(f"   ✗ {portal[:50]} - ❌ Timeout esperando conexión")
+            return {
+                'portal': portal,
+                'mac': mac,
+                'expiry': expiry,
+                'source_file': source,
+                'error': 'Semaphore timeout',
+                'success': False
+            }
         
         try:
+            # Pequeño delay aleatorio para evitar saturar
+            time.sleep(random.uniform(0.1, 0.3))
+            
             player = STBPlayer(portal, mac)
             if player.connect():
                 profile = player.get_profile()
@@ -809,27 +906,24 @@ def check_single_portal(portal_info, country_filter, t, retry=True):
                     
                     if count > 0:
                         with print_lock:
-                            print(f"  {t['check_ok']} {portal} - {mac[:11]}... - {user_name} - {count} ch")
+                            print(f"   ✓ {portal[:50]} - {user_name[:20]} - ✅ {count} canales encontrados")
                         return result
                     else:
                         result['success'] = False
                         with print_lock:
-                            print(f"  {t['check_fail']} {portal} - {mac[:11]}... - {t['no_channels_country']}")
+                            print(f"   ✗ {portal[:50]} - ❌ Sin canales del país")
                         return result
                 else:
                     categories = player.get_categories()
                     result['categories'] = len(categories)
+                    total_channels = sum(cat.get('channels_count', 0) for cat in categories)
                     with print_lock:
-                        print(f"  {t['check_ok']} {portal} - {mac[:11]}... - {user_name} - {len(categories)} cats")
+                        print(f"   ✓ {portal[:50]} - {user_name[:20]} - ✅ {total_channels} canales ({len(categories)} categorías)")
                     return result
             else:
-                # Si falla conexión, reintentar una vez
-                if retry:
-                    time.sleep(1)
-                    return check_single_portal(portal_info, country_filter, t, retry=False)
-                    
+                # Si falla conexión, no reintentar para ser más rápido
                 with print_lock:
-                    print(f"  {t['check_fail']} {portal} - {mac[:11]}... - {t['error_connect']}")
+                    print(f"   ✗ {portal[:50]} - ❌ Error de conexión")
                 return {
                     'portal': portal,
                     'mac': mac,
@@ -839,13 +933,8 @@ def check_single_portal(portal_info, country_filter, t, retry=True):
                     'success': False
                 }
         except Exception as e:
-            # Reintentar una vez en caso de error
-            if retry:
-                time.sleep(1)
-                return check_single_portal(portal_info, country_filter, t, retry=False)
-                
             with print_lock:
-                print(f"  {t['check_fail']} {portal} - {mac[:11]}... - {str(e)[:30]}")
+                print(f"   ✗ {portal[:50]} - ❌ Error: {str(e)[:40]}")
             return {
                 'portal': portal,
                 'mac': mac,
@@ -854,6 +943,21 @@ def check_single_portal(portal_info, country_filter, t, retry=True):
                 'error': str(e)[:50],
                 'success': False
             }
+        finally:
+            # Asegurar que siempre se libera el semáforo
+            semaphore.release()
+    except Exception as e:
+        # Error crítico, retornar fallo
+        with print_lock:
+            print(f"   ✗ {portal[:50]} - ❌ Error crítico: {str(e)[:40]}")
+        return {
+            'portal': portal,
+            'mac': mac,
+            'expiry': expiry,
+            'source_file': source,
+            'error': f'Critical: {str(e)[:40]}',
+            'success': False
+        }
 
 
 def get_num_threads(t):
@@ -911,8 +1015,6 @@ def batch_check(lang='es'):
     completed = [0]  # Usar lista para poder modificar en closure
     total = len(portals)
     
-    print(f"\n[*] Verificando {total} portales...")
-    
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = {executor.submit(check_single_portal, p, country_filter, t): p for p in portals}
         
@@ -924,11 +1026,6 @@ def batch_check(lang='es'):
                 working.append(result)
             else:
                 not_working.append(result)
-            
-            # Mostrar progreso cada 10 verificaciones
-            if completed[0] % 10 == 0 or completed[0] == total:
-                with print_lock:
-                    print(t['progress'].format(completed[0], total, (completed[0]/total)*100))
     
     # Mostrar resultados
     print("\n" + "="*60)
